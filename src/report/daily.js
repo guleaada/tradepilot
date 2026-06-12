@@ -1,0 +1,185 @@
+// Daily HTML + console reporting. The equity curve is inline SVG — no chart libs.
+import fs from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { config } from '../config.js';
+import { getDb } from '../db.js';
+import { getCash, getEquity, getOpenPositions, todayPnl } from '../engine/portfolio.js';
+import { getDailySpend } from '../ai/budget.js';
+import { getLatestSentiment } from '../ai/sentiment.js';
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+export function computeStats(db = getDb()) {
+  const closed = db.prepare("SELECT * FROM trades WHERE status = 'closed' ORDER BY id").all();
+  const wins = closed.filter((t) => t.pnl > 0);
+  const losses = closed.filter((t) => t.pnl <= 0);
+  const grossWin = wins.reduce((a, t) => a + t.pnl, 0);
+  const grossLoss = Math.abs(losses.reduce((a, t) => a + t.pnl, 0));
+  const snapshots = db.prepare('SELECT ts, equity FROM equity_snapshots ORDER BY id').all();
+
+  let peak = -Infinity;
+  let maxDrawdown = 0;
+  for (const s of snapshots) {
+    peak = Math.max(peak, s.equity);
+    if (peak > 0) maxDrawdown = Math.max(maxDrawdown, (peak - s.equity) / peak);
+  }
+
+  const totalSpend = db.prepare('SELECT COALESCE(SUM(spend), 0) AS s FROM ai_budget').get().s;
+
+  return {
+    closedCount: closed.length,
+    winRate: closed.length ? wins.length / closed.length : null,
+    profitFactor: grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? Infinity : null,
+    totalPnl: closed.reduce((a, t) => a + t.pnl, 0),
+    maxDrawdown,
+    totalAiSpend: totalSpend,
+    closed,
+    snapshots,
+  };
+}
+
+function equityCurveSvg(snapshots, width = 720, height = 220) {
+  if (snapshots.length < 2) {
+    return `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg"><text x="20" y="40" font-family="monospace">Not enough equity snapshots yet.</text></svg>`;
+  }
+  const pad = 36;
+  const eqs = snapshots.map((s) => s.equity);
+  const min = Math.min(...eqs);
+  const max = Math.max(...eqs);
+  const span = max - min || 1;
+  const pts = snapshots
+    .map((s, i) => {
+      const x = pad + (i / (snapshots.length - 1)) * (width - 2 * pad);
+      const y = height - pad - ((s.equity - min) / span) * (height - 2 * pad);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(' ');
+  return `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+  <rect width="${width}" height="${height}" fill="#fafafa" stroke="#ddd"/>
+  <text x="${pad}" y="18" font-family="monospace" font-size="12">max ${max.toFixed(2)}</text>
+  <text x="${pad}" y="${height - 8}" font-family="monospace" font-size="12">min ${min.toFixed(2)}</text>
+  <polyline fill="none" stroke="#2563eb" stroke-width="2" points="${pts}"/>
+</svg>`;
+}
+
+export function generateReport(db = getDb(), date = new Date().toISOString().slice(0, 10)) {
+  const stats = computeStats(db);
+  const open = getOpenPositions(db);
+  const cash = getCash(db);
+  const equity = getEquity({}, db);
+  const regimes = db.prepare('SELECT * FROM regime_calls ORDER BY id DESC LIMIT 10').all();
+  const sentiments = config.pairs
+    .map((pair) => ({ pair, s: getLatestSentiment(pair, db) }))
+    .filter(({ s }) => s);
+  const anthropicSpendToday = getDailySpend(db, date, 'anthropic');
+  const grokSpendToday = getDailySpend(db, date, 'grok');
+
+  const pct = (v) => (v === null ? 'n/a' : `${(v * 100).toFixed(1)}%`);
+  const usd = (v) => `$${Number(v).toFixed(2)}`;
+
+  const html = `<!doctype html>
+<html><head><meta charset="utf-8"><title>TradePilot ${esc(date)}</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 2rem; color: #111; }
+  table { border-collapse: collapse; margin: 1rem 0; }
+  th, td { border: 1px solid #ccc; padding: 4px 10px; font-size: 13px; text-align: right; }
+  th { background: #f3f4f6; }
+  td:first-child, th:first-child { text-align: left; }
+  .neg { color: #dc2626; } .pos { color: #16a34a; }
+  h2 { margin-top: 2rem; }
+  .banner { background: #fef3c7; border: 1px solid #f59e0b; padding: 8px 12px; border-radius: 6px; }
+</style></head><body>
+<h1>TradePilot — Daily Report ${esc(date)}</h1>
+<p class="banner"><strong>Paper trading only.</strong> Simulated fills against live market data. No real orders.</p>
+
+<h2>Equity curve</h2>
+${equityCurveSvg(stats.snapshots)}
+
+<h2>Summary</h2>
+<table>
+<tr><th>Equity</th><td>${usd(equity)}</td></tr>
+<tr><th>Cash</th><td>${usd(cash)}</td></tr>
+<tr><th>Closed trades</th><td>${stats.closedCount}</td></tr>
+<tr><th>Win rate</th><td>${pct(stats.winRate)}</td></tr>
+<tr><th>Profit factor</th><td>${stats.profitFactor === null ? 'n/a' : stats.profitFactor === Infinity ? '∞' : stats.profitFactor.toFixed(2)}</td></tr>
+<tr><th>Total P&amp;L</th><td class="${stats.totalPnl >= 0 ? 'pos' : 'neg'}">${usd(stats.totalPnl)}</td></tr>
+<tr><th>Max drawdown</th><td>${pct(stats.maxDrawdown)}</td></tr>
+<tr><th>Today AI spend (Claude)</th><td>$${anthropicSpendToday.toFixed(4)}</td></tr>
+<tr><th>Today AI spend (Grok)</th><td>$${grokSpendToday.toFixed(4)}</td></tr>
+<tr><th>Total AI spend</th><td>$${stats.totalAiSpend.toFixed(4)}</td></tr>
+</table>
+
+<h2>Latest X sentiment (Grok)</h2>
+<table>
+<tr><th>Pair</th><th>Sentiment</th><th>Intensity</th><th>Key narratives</th><th>Notable events</th><th>As of</th></tr>
+${sentiments.map(({ pair, s }) => `<tr><td>${esc(pair)}</td><td>${esc(s.sentiment)}</td><td>${s.intensity}</td><td style="text-align:left">${esc(s.key_narratives.join('; '))}</td><td style="text-align:left">${esc(s.notable_events ?? '')}</td><td>${esc(s.ts)}</td></tr>`).join('\n') || '<tr><td colspan="6">none (xAI layer disabled or no calls yet)</td></tr>'}
+</table>
+
+<h2>Open positions</h2>
+<table>
+<tr><th>Pair</th><th>Qty</th><th>Entry</th><th>Stop</th><th>Take-profit</th><th>Opened</th></tr>
+${open.map((p) => `<tr><td>${esc(p.pair)}</td><td>${p.qty.toFixed(6)}</td><td>${p.entry_price.toFixed(2)}</td><td>${p.stop_price.toFixed(2)}</td><td>${p.tp_price.toFixed(2)}</td><td>${esc(p.entry_time)}</td></tr>`).join('\n') || '<tr><td colspan="6">none</td></tr>'}
+</table>
+
+<h2>Closed trades</h2>
+<table>
+<tr><th>Pair</th><th>Entry</th><th>Exit</th><th>Qty</th><th>P&amp;L</th><th>Reason</th><th>Closed at</th></tr>
+${stats.closed.map((t) => `<tr><td>${esc(t.pair)}</td><td>${t.entry_price.toFixed(2)}</td><td>${(t.exit_price ?? 0).toFixed(2)}</td><td>${t.qty.toFixed(6)}</td><td class="${t.pnl >= 0 ? 'pos' : 'neg'}">${usd(t.pnl)}</td><td>${esc(t.exit_reason)}</td><td>${esc(t.exit_time)}</td></tr>`).join('\n') || '<tr><td colspan="7">none</td></tr>'}
+</table>
+
+<h2>Last 10 regime calls</h2>
+<table>
+<tr><th>Time</th><th>Pair</th><th>Regime</th><th>Conf</th><th>Trade allowed</th><th>Cost</th><th>Reasoning</th></tr>
+${regimes.map((r) => `<tr><td>${esc(r.ts)}</td><td>${esc(r.pair)}</td><td>${esc(r.regime)}</td><td>${r.confidence}</td><td>${r.trade_allowed ? 'yes' : 'no'}</td><td>$${(r.est_cost ?? 0).toFixed(4)}</td><td style="text-align:left">${esc(r.reasoning)}</td></tr>`).join('\n') || '<tr><td colspan="7">none</td></tr>'}
+</table>
+</body></html>`;
+
+  fs.mkdirSync(config.reportsDir, { recursive: true });
+  const file = path.join(config.reportsDir, `${date}.html`);
+  fs.writeFileSync(file, html);
+  return file;
+}
+
+export function consoleSummary(prices = {}, db = getDb()) {
+  const equity = getEquity(prices, db);
+  const cash = getCash(db);
+  const open = getOpenPositions(db);
+  const claudeSpend = getDailySpend(db, undefined, 'anthropic');
+  const grokSpend = getDailySpend(db, undefined, 'grok');
+  const pnl = todayPnl(db);
+  const lines = [
+    '── TradePilot cycle summary ' + '─'.repeat(30),
+    `equity: $${equity.toFixed(2)}   cash: $${cash.toFixed(2)}   today P&L: $${pnl.toFixed(2)}   today AI spend: claude $${claudeSpend.toFixed(4)} | grok $${grokSpend.toFixed(4)}`,
+  ];
+  if (open.length) {
+    for (const p of open) {
+      const mark = prices[p.pair] ?? p.entry_price;
+      const upnl = (mark - p.entry_price) * p.qty;
+      lines.push(
+        `  open ${p.pair}: qty ${p.qty.toFixed(6)} @ ${p.entry_price.toFixed(2)} | stop ${p.stop_price.toFixed(2)} | tp ${p.tp_price.toFixed(2)} | uPnL $${upnl.toFixed(2)}`,
+      );
+    }
+  } else {
+    lines.push('  open positions: none');
+  }
+  for (const pair of config.pairs) {
+    const s = getLatestSentiment(pair, db);
+    if (s) {
+      lines.push(`  sentiment ${pair}: ${s.sentiment}/${s.intensity}${s.key_narratives.length ? ` — ${s.key_narratives.join('; ')}` : ''}`);
+    }
+  }
+  lines.push('─'.repeat(58));
+  const text = lines.join('\n');
+  console.log(text);
+  return text;
+}
+
+// `npm run report`
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const file = generateReport();
+  consoleSummary();
+  console.log(`report written: ${file}`);
+}

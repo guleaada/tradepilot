@@ -1,0 +1,19 @@
+# secrets
+.env
+*.pem
+*.key
+
+# dependencies
+node_modules/
+
+# mock/demo database and sqlite sidecar files
+data/*.mock.db
+data/*.db-wal
+data/*.db-shm
+data/*.db-journal
+
+# NOTE: data/tradepilot.db is intentionally tracked — the GitHub Actions
+# workflow commits it back to the repo after each cycle.
+
+# macOS
+.DS_Store

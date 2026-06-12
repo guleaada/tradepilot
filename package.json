@@ -1,0 +1,20 @@
+{
+  "name": "tradepilot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hybrid AI crypto paper-trading agent. PAPER TRADING ONLY — no live orders.",
+  "type": "module",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "cycle": "node src/index.js --once",
+    "report": "node src/report/daily.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "dotenv": "^16.4.5"
+  }
+}
