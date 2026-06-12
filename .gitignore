@@ -11,6 +11,8 @@ data/*.mock.db
 data/*.db-wal
 data/*.db-shm
 data/*.db-journal
+data/*.bak
+data/backtest_*.db
 
 # NOTE: data/tradepilot.db is intentionally tracked — the GitHub Actions
 # workflow commits it back to the repo after each cycle.

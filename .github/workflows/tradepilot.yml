@@ -41,6 +41,9 @@ jobs:
           EXECUTOR: ${{ vars.TRADEPILOT_EXECUTOR }}
           BINANCE_TESTNET_API_KEY: ${{ secrets.BINANCE_TESTNET_API_KEY }}
           BINANCE_TESTNET_API_SECRET: ${{ secrets.BINANCE_TESTNET_API_SECRET }}
+          # Optional: Telegram alerts (no-op when unset).
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: npm run cycle
 
       - name: Generate report

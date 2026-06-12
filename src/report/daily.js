@@ -4,7 +4,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { config } from '../config.js';
 import { getDb } from '../db.js';
-import { getCash, getEquity, getOpenPositions, todayPnl } from '../engine/portfolio.js';
+import { getCash, getEquity, getOpenPositions, todayPnl, volTargetScaleFromDb } from '../engine/portfolio.js';
 import { getDailySpend } from '../ai/budget.js';
 import { getLatestSentiment } from '../ai/sentiment.js';
 
@@ -29,13 +29,40 @@ export function computeStats(db = getDb()) {
 
   const totalSpend = db.prepare('SELECT COALESCE(SUM(spend), 0) AS s FROM ai_budget').get().s;
 
+  // Expectancy per trade: (avg win x win rate) - (avg loss x loss rate).
+  const winRate = closed.length ? wins.length / closed.length : null;
+  const avgWin = wins.length ? grossWin / wins.length : 0;
+  const avgLoss = losses.length ? grossLoss / losses.length : 0;
+  const expectancy = closed.length ? avgWin * winRate - avgLoss * (1 - winRate) : null;
+
+  let curW = 0; let curL = 0; let maxConsecWins = 0; let maxConsecLosses = 0;
+  for (const t of closed) {
+    if (t.pnl > 0) { curW++; curL = 0; } else { curL++; curW = 0; }
+    maxConsecWins = Math.max(maxConsecWins, curW);
+    maxConsecLosses = Math.max(maxConsecLosses, curL);
+  }
+
+  // Regime accuracy: how often each regime label at entry produced a winner.
+  const regimeAccuracy = db
+    .prepare(
+      `SELECT regime_at_entry AS regime, COUNT(*) AS trades,
+              SUM(CASE WHEN actual_return_pct > 0 THEN 1 ELSE 0 END) AS correct,
+              AVG(actual_return_pct) AS avg_return_pct
+       FROM regime_accuracy GROUP BY regime_at_entry ORDER BY trades DESC`,
+    )
+    .all();
+
   return {
     closedCount: closed.length,
-    winRate: closed.length ? wins.length / closed.length : null,
+    winRate,
     profitFactor: grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? Infinity : null,
     totalPnl: closed.reduce((a, t) => a + t.pnl, 0),
     maxDrawdown,
     totalAiSpend: totalSpend,
+    expectancy,
+    maxConsecWins,
+    maxConsecLosses,
+    regimeAccuracy,
     closed,
     snapshots,
   };
@@ -108,9 +135,18 @@ ${equityCurveSvg(stats.snapshots)}
 <tr><th>Profit factor</th><td>${stats.profitFactor === null ? 'n/a' : stats.profitFactor === Infinity ? '∞' : stats.profitFactor.toFixed(2)}</td></tr>
 <tr><th>Total P&amp;L</th><td class="${stats.totalPnl >= 0 ? 'pos' : 'neg'}">${usd(stats.totalPnl)}</td></tr>
 <tr><th>Max drawdown</th><td>${pct(stats.maxDrawdown)}</td></tr>
+<tr><th>Expectancy / trade</th><td>${stats.expectancy === null ? 'n/a' : usd(stats.expectancy)}</td></tr>
+<tr><th>Max consecutive wins / losses</th><td>${stats.maxConsecWins} / ${stats.maxConsecLosses}</td></tr>
+<tr><th>Vol-targeting scale factor</th><td>${volTargetScaleFromDb(db).toFixed(2)}</td></tr>
 <tr><th>Today AI spend (Claude)</th><td>$${anthropicSpendToday.toFixed(4)}</td></tr>
 <tr><th>Today AI spend (Grok)</th><td>$${grokSpendToday.toFixed(4)}</td></tr>
 <tr><th>Total AI spend</th><td>$${stats.totalAiSpend.toFixed(4)}</td></tr>
+</table>
+
+<h2>Regime accuracy (profitable trades per regime at entry)</h2>
+<table>
+<tr><th>Regime</th><th>Trades</th><th>Correct</th><th>Hit rate</th><th>Avg return %</th></tr>
+${stats.regimeAccuracy.map((r) => `<tr><td>${esc(r.regime)}</td><td>${r.trades}</td><td>${r.correct}</td><td>${r.trades ? ((r.correct / r.trades) * 100).toFixed(1) : 'n/a'}%</td><td>${r.avg_return_pct === null ? 'n/a' : r.avg_return_pct.toFixed(2)}</td></tr>`).join('\n') || '<tr><td colspan="5">no completed trades with regime data yet</td></tr>'}
 </table>
 
 <h2>Latest X sentiment (Grok)</h2>

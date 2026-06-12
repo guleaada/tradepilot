@@ -89,6 +89,52 @@ export function atr(candles, period = 14) {
   return out;
 }
 
+// Percentage returns of a price series: r_i = p_i / p_{i-1} - 1.
+export function returns(values) {
+  const out = [];
+  for (let i = 1; i < values.length; i++) {
+    if (values[i - 1] !== 0) out.push(values[i] / values[i - 1] - 1);
+  }
+  return out;
+}
+
+export function stdev(values) {
+  if (values.length < 2) return null;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const variance = values.reduce((a, v) => a + (v - mean) ** 2, 0) / values.length;
+  return Math.sqrt(variance);
+}
+
+// Pearson correlation between two equal-length series. Returns null when the
+// inputs are too short or have zero variance.
+export function correlation(a, b) {
+  const n = Math.min(a.length, b.length);
+  if (n < 3) return null;
+  const xa = a.slice(-n);
+  const xb = b.slice(-n);
+  const meanA = xa.reduce((s, v) => s + v, 0) / n;
+  const meanB = xb.reduce((s, v) => s + v, 0) / n;
+  let cov = 0;
+  let varA = 0;
+  let varB = 0;
+  for (let i = 0; i < n; i++) {
+    const da = xa[i] - meanA;
+    const db = xb[i] - meanB;
+    cov += da * db;
+    varA += da * da;
+    varB += db * db;
+  }
+  if (varA === 0 || varB === 0) return null;
+  return cov / Math.sqrt(varA * varB);
+}
+
+// Fraction of window values <= the current (last) value, in [0, 1].
+export function percentileRank(window, current) {
+  const vals = window.filter((v) => Number.isFinite(v));
+  if (!vals.length || !Number.isFinite(current)) return null;
+  return vals.filter((v) => v <= current).length / vals.length;
+}
+
 // Simple volatility: stdev of percentage returns over the trailing window.
 export function volatility(values, period = 20) {
   if (values.length < period + 1) return null;

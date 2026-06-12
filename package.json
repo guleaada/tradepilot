@@ -11,6 +11,8 @@
     "start": "node src/index.js",
     "cycle": "node src/index.js --once",
     "report": "node src/report/daily.js",
+    "backtest": "node src/backtest.js",
+    "monte-carlo": "node src/montecarlo.js",
     "test": "node --test"
   },
   "dependencies": {

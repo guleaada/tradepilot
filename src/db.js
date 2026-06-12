@@ -39,7 +39,24 @@ CREATE TABLE IF NOT EXISTS trades (
   pnl         REAL,
   exit_reason TEXT,
   entry_order_id TEXT,
-  exit_order_id  TEXT
+  exit_order_id  TEXT,
+  initial_risk        REAL,
+  trailing_stop_active INTEGER DEFAULT 0,
+  partial_exit_done    INTEGER DEFAULT 0,
+  remainder_qty        REAL,
+  partial_pnl          REAL DEFAULT 0,
+  regime_at_entry      TEXT,
+  confidence_at_entry  REAL
+);
+
+CREATE TABLE IF NOT EXISTS regime_accuracy (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts                  TEXT NOT NULL,
+  pair                TEXT NOT NULL,
+  regime_at_entry     TEXT NOT NULL,
+  confidence_at_entry REAL,
+  actual_return_pct   REAL,
+  duration_minutes    REAL
 );
 
 CREATE TABLE IF NOT EXISTS orders (
@@ -137,11 +154,22 @@ function migrateAiBudget(db) {
   `);
 }
 
-// Pre-testnet DBs lack the Binance order-id columns on trades.
+// Additive trade-table migrations for DBs created before newer features.
+// Columns are only ever ADDED — never renamed or dropped.
 function migrateTrades(db) {
   const cols = db.prepare('PRAGMA table_info(trades)').all().map((c) => c.name);
-  if (!cols.includes('entry_order_id')) db.exec('ALTER TABLE trades ADD COLUMN entry_order_id TEXT');
-  if (!cols.includes('exit_order_id')) db.exec('ALTER TABLE trades ADD COLUMN exit_order_id TEXT');
+  const add = (name, ddl) => {
+    if (!cols.includes(name)) db.exec(`ALTER TABLE trades ADD COLUMN ${ddl}`);
+  };
+  add('entry_order_id', 'entry_order_id TEXT');
+  add('exit_order_id', 'exit_order_id TEXT');
+  add('initial_risk', 'initial_risk REAL');
+  add('trailing_stop_active', 'trailing_stop_active INTEGER DEFAULT 0');
+  add('partial_exit_done', 'partial_exit_done INTEGER DEFAULT 0');
+  add('remainder_qty', 'remainder_qty REAL');
+  add('partial_pnl', 'partial_pnl REAL DEFAULT 0');
+  add('regime_at_entry', 'regime_at_entry TEXT');
+  add('confidence_at_entry', 'confidence_at_entry REAL');
 }
 
 let _db = null;
@@ -162,9 +190,10 @@ export function nowIso() {
   return new Date().toISOString();
 }
 
-export function logEvent(type, detail, db = getDb()) {
+// `ts` is overridable so the backtester can stamp events with candle time.
+export function logEvent(type, detail, db = getDb(), ts = nowIso()) {
   db.prepare('INSERT INTO events (ts, type, detail) VALUES (?, ?, ?)').run(
-    nowIso(),
+    ts,
     type,
     typeof detail === 'string' ? detail : JSON.stringify(detail),
   );

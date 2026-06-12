@@ -27,7 +27,9 @@ export const config = {
   reportsDir: path.join(ROOT, 'reports'),
 
   // --- market data ---
-  pairs: list(process.env.PAIRS, ['BTCUSDT', 'ETHUSDT']),
+  pairs: list(process.env.PAIRS, ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT']),
+  // Pairs whose 24h quote volume is below this are excluded for the run.
+  liquidityMinVolume24h: num(process.env.LIQUIDITY_MIN_VOLUME_24H, 50_000_000),
   binanceBase: process.env.BINANCE_BASE || 'https://api.binance.com',
   binanceFapiBase: process.env.BINANCE_FAPI_BASE || 'https://fapi.binance.com',
   klineLimit: num(process.env.KLINE_LIMIT, 200),
@@ -94,6 +96,40 @@ export const config = {
   regimeFlipConfidence: num(process.env.REGIME_FLIP_CONFIDENCE, 70),
   rsiEntryMin: num(process.env.RSI_ENTRY_MIN, 45),
   rsiEntryMax: num(process.env.RSI_ENTRY_MAX, 70),
+
+  // --- entry filters (each degrades to the old behavior when disabled) ---
+  volumeFilterEnabled: process.env.VOLUME_FILTER_ENABLED !== 'false',
+  volumeMinRatio: num(process.env.VOLUME_MIN_RATIO, 1.1), // current 1h vol >= 110% of 20-period avg
+  mtfDailyFilterEnabled: process.env.MTF_DAILY_FILTER_ENABLED !== 'false', // price > daily EMA(50)
+  dynamicRsiEnabled: process.env.DYNAMIC_RSI_ENABLED !== 'false', // ATR-percentile RSI zones
+  correlationFilterEnabled: process.env.CORRELATION_FILTER_ENABLED !== 'false',
+  correlationMax: num(process.env.CORRELATION_MAX, 0.85), // block entry if 1h-return corr with an open pair >= this
+  weekendFilterEnabled: process.env.WEEKEND_FILTER_ENABLED === 'true', // opt-in: Fri 20:00 -> Sun 20:00 UTC
+
+  // --- trailing stop + partial exits ---
+  trailingStopEnabled: process.env.TRAILING_STOP_ENABLED !== 'false',
+  breakevenR: num(process.env.BREAKEVEN_R, 1.5), // move stop to entry at +1.5R
+  partialExitR: num(process.env.PARTIAL_EXIT_R, 2.0), // take partial at +2.0R
+  partialExitFraction: num(process.env.PARTIAL_EXIT_FRACTION, 0.5),
+  extendedTpR: num(process.env.EXTENDED_TP_R, 4.0), // remainder TP after partial
+
+  // --- regime-dependent risk sizing ---
+  regimeRiskScalingEnabled: process.env.REGIME_RISK_SCALING_ENABLED !== 'false',
+  riskPctHighConf: num(process.env.RISK_PCT_HIGH_CONF, 0.015), // bullish + confidence >= 80
+  maxNotionalHighConf: num(process.env.MAX_NOTIONAL_HIGH_CONF, 0.3),
+  highConfThreshold: num(process.env.HIGH_CONF_THRESHOLD, 80),
+
+  // --- emergency price-action exit ---
+  emergencyExitEnabled: process.env.EMERGENCY_EXIT_ENABLED !== 'false',
+  emergencyExitDropPct: num(process.env.EMERGENCY_EXIT_DROP_PCT, 0.05), // close if 5% below entry
+
+  // --- volatility targeting ---
+  volTargetingEnabled: process.env.VOL_TARGETING_ENABLED !== 'false',
+  volTargetAnnualized: num(process.env.VOL_TARGET_ANNUALIZED, 0.4), // 40% annualized
+
+  // --- Telegram alerts (optional; no-op when unset) ---
+  telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
+  telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
 
   // --- execution ---
   // 'paper' (default) or 'testnet'. The testnet base URL is intentionally NOT

@@ -21,39 +21,47 @@ TradePilot exists to study how an AI regime classifier interacts with a determin
 ```
                  ┌──────────────────────────────────────────────────────┐
                  │                      index.js                        │
-                 │        orchestration loop (every 15 minutes)         │
+                 │   orchestration loop: integrity check, DB backup,    │
+                 │   liquidity filter, load-all → decide-all, alerts    │
                  └──────┬───────────────────┬──────────────────┬────────┘
                         │                   │                  │
               ┌─────────▼────────┐ ┌────────▼────────┐ ┌───────▼────────┐
               │ data/binance.js  │ │  indicators.js  │ │ report/daily.js│
-              │ klines, ticker,  │ │ RSI EMA ATR vol │ │ HTML + console │
-              │ funding (public) │ │  (hand-rolled)  │ └────────────────┘
-              └─────────┬────────┘ └────────┬────────┘
+              │ 1h/4h/1d klines, │ │ RSI EMA ATR vol │ │ HTML + console │
+              │ ticker, funding  │ │ corr percentile │ │ regime accuracy│
+              └─────────┬────────┘ └────────┬────────┘ └────────────────┘
                         │                   │
-                        │     compact JSON summary
+                        │   compact JSON summary + portfolio context
                         │                   │
                         │          ┌────────▼─────────────────────────┐
                         │          │ AI LAYER (slow, every 4h/pair)   │
-                        │          │  ai/regime.js → Claude API       │
-                        │          │  ai/budget.js → $0.50/day cap    │
+                        │          │  ai/sentiment.js → Grok reads X  │
+                        │          │  ai/regime.js → Claude decides   │
+                        │          │  ai/budget.js → per-provider cap │
                         │          │  optional Groq yes/no pre-filter │
-                        │          │  output: {regime, confidence,    │
-                        │          │           trade_allowed, reason} │
                         │          └────────┬─────────────────────────┘
                         │                   │  opinion only — no orders
               ┌─────────▼───────────────────▼─────────────────────────┐
               │ RULE LAYER (deterministic, every cycle)               │
-              │  engine/rules.js     entries, exits, sizing, halts    │
-              │  engine/portfolio.js cash, equity, P&L                │
-              │  engine/executor.js  PaperExecutor (slippage + fees)  │
+              │  engine/rules.js   entry filters (volume, MTF, RSI    │
+              │                    zones, correlation, weekend),      │
+              │                    trailing/partial exits, emergency  │
+              │                    exit, regime sizing, vol targeting │
+              │  engine/portfolio.js  cash, equity, P&L, vol scale    │
+              │  engine/executor.js   PaperExecutor (default)         │
+              │  engine/testnetExecutor.js  Binance Spot Testnet      │
               └─────────────────────────┬─────────────────────────────┘
                                         │
-                              ┌─────────▼─────────┐
-                              │   db.js (SQLite)  │
-                              │ trades, regimes,  │
-                              │ equity, budget,   │
-                              │ events            │
-                              └───────────────────┘
+                              ┌─────────▼─────────┐     ┌──────────────────┐
+                              │   db.js (SQLite)  │◀────│ src/backtest.js  │
+                              │ trades, regimes,  │     │ replay + grid    │
+                              │ sentiment, equity,│     ├──────────────────┤
+                              │ budget, orders,   │     │ src/montecarlo.js│
+                              │ regime_accuracy   │     │ resampled risk   │
+                              └─────────┬─────────┘     ├──────────────────┤
+                                        │               │ src/alert.js     │
+                                        └──────────────▶│ Telegram (opt-in)│
+                                                        └──────────────────┘
 ```
 
 ## Setup
@@ -63,10 +71,13 @@ Requires Node.js ≥ 18.17 (built-in `fetch`).
 ```bash
 npm install
 cp .env.example .env        # add your ANTHROPIC_API_KEY
-npm test                    # 20 unit tests (indicators, sizing, exits, parsing, budget)
+npm test                    # 65 unit tests
 npm run cycle               # one single pass
 npm start                   # continuous loop, one cycle every 15 minutes
 npm run report              # writes reports/YYYY-MM-DD.html
+npm run backtest -- --days 90 --mock-regime        # historical replay
+npm run backtest -- --grid-search --mock-regime    # parameter sweep
+npm run monte-carlo                                 # risk-of-ruin analysis
 ```
 
 To try it with zero network calls and zero AI spend:
@@ -83,20 +94,31 @@ Every tunable (pairs, cadences, risk %, budget cap, model, fees, slippage) lives
 
 The rule engine runs every 15 minutes and is the only component that opens or closes positions. Long-only spot, v1.
 
-**Entry — all must pass:**
+**Entry — all must pass** (each new filter has a config flag; disabled = original behavior):
 
 | Check | Condition |
 |---|---|
 | AI regime | `bullish`, `trade_allowed: true`, confidence ≥ 60 |
 | Trend filter | price above EMA(50) on 4h |
-| Momentum filter | RSI(14) on 1h between 45 and 70 |
+| Daily trend filter | price above EMA(50) on the daily timeframe |
+| Momentum filter | RSI(14) on 1h inside the dynamic band (see below) |
+| Volume confirmation | current 1h volume ≥ 110% of its 20-period average |
+| Correlation filter | 20-period 1h-return correlation with every open pair < 0.85 |
+| Sentiment caution | if Grok says `very_bullish` at intensity > 90: RSI ≤ 60 and confidence ≥ 75 |
+| Weekend filter | (opt-in) not between Fri 20:00 and Sun 20:00 UTC |
 | Slots | no open position in the pair, max 2 concurrent positions |
 | Cooldown | no stop-out on this pair in the last 4 hours |
 | Halt | daily drawdown halt not active |
 
-**Risk (hard-coded, never AI-controlled):** risk 1% of equity per trade; position size = risk ÷ stop distance; stop = 1.5 × ATR(14, 1h) below entry; take-profit = 2.5 × ATR above (≈1.67 R:R); position notional capped at 25% of equity.
+**Dynamic RSI zones:** the RSI band adapts to the ATR percentile over the trailing 14 days of hourly ATRs — calm tape (< 40th pct) narrows to [48, 65], volatile tape (> 60th pct) widens to [42, 75], otherwise the standard [45, 70].
 
-**Exits, checked every cycle:** stop hit, take-profit hit, or the AI flips to `bearish` with confidence ≥ 70.
+**Risk (hard-coded, never AI-controlled):** risk 1% of equity per trade — or 1.5% with a 30% notional cap when the regime is bullish at confidence ≥ 80 (regime-dependent sizing); position size = risk ÷ stop distance; stop = 1.5 × ATR(14, 1h) below entry; take-profit = 2.5 × ATR above. **Volatility targeting** scales all new positions down proportionally when realized portfolio volatility (20-period hourly equity returns, annualized) exceeds 40% — it never scales up.
+
+**Position management, every cycle:**
+- **Trailing stop:** at +1.5R the stop moves to breakeven (entry price).
+- **Partial exit:** at +2.0R, 50% of the position is closed at market; the remainder keeps the breakeven stop and targets +4.0R.
+- **Emergency exit:** any position trading ≥ 5% below entry is closed immediately (`emergency_exit`), regardless of stop distance or regime.
+- **Standard exits:** stop hit, take-profit hit, or the AI flips to `bearish` with confidence ≥ 70.
 
 **Daily drawdown halt:** if equity drops 3% from the day's opening equity, nothing is force-closed, but all new entries are blocked until the next UTC day (`RISK_HALT` event logged).
 
@@ -133,6 +155,26 @@ Note: the xAI model name, Live Search parameters, and per-source search pricing 
 The console prints a one-screen summary (equity, open positions, today's P&L, today's AI spend) at the end of every cycle.
 
 Everything in the report is derived from SQLite — every AI decision and every rule decision is explainable from the database alone (`regime_calls`, `trades`, `equity_snapshots`, `ai_budget`, `events`).
+
+## Backtester
+
+`npm run backtest -- --days 90 --pair BTCUSDT --mock-regime` replays historical 1h Binance candles through the **same** `indicators.js` + `rules.js` code the live loop uses, with the PaperExecutor fill model, into a separate timestamped DB (`data/backtest_*.db`). Indicator arrays are computed once over the full series — RSI/EMA/ATR are recursive, so there is no lookahead. It prints and stores total/annualized return, max drawdown, Sharpe, Sortino, win rate, profit factor, expectancy, average holding time, consecutive win/loss streaks, and `RISK_HALT` counts. `--mock-regime` uses a canned bullish regime (recommended — without it, Claude is called on the sim-time cadence and today's real budget cap applies). `--grid-search` sweeps stop ATR × TP ATR × RSI floor × confidence threshold (144 combos) and writes a Sharpe-ranked table to `reports/grid_search_*.html` — **best parameters are reported, never auto-applied**.
+
+## Monte Carlo risk analysis
+
+`npm run monte-carlo` resamples the closed-trade P&L distribution (10,000 simulations of N random trade sequences) and reports the median final equity, the 5th-percentile outcome (risk-of-ruin boundary), the probability of a ≥20% drawdown, and the probability of doubling — with an SVG distribution chart in `reports/montecarlo_*.html`. Point it at a backtest DB with `DB_PATH=data/backtest_<stamp>.db npm run monte-carlo`.
+
+## Regime accuracy tracking
+
+Every trade stores the regime and confidence that were active at entry; on close, the realized return and holding time land in the `regime_accuracy` table. The daily report shows, per regime label, how often that opinion produced a profitable trade — so you can see whether Claude's `bullish` calls actually pay before trusting higher confidence levels.
+
+## Telegram alerts (optional)
+
+If `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set, [src/alert.js](src/alert.js) pushes notifications for trade opens/closes (with P&L), partial exits, emergency exits, `RISK_HALT`, `REGIME_PARSE_FAILURE`, a third consecutive `BUDGET_SKIPPED`, and a once-daily equity summary. Alerting is strictly best-effort: unset keys make it a silent no-op, and no failure can block or crash the cycle.
+
+## Robustness
+
+At startup the SQLite database must pass `PRAGMA integrity_check` or the process exits before any trading activity; each cycle starts by refreshing an on-disk backup (`tradepilot.db.bak`). Pairs whose 24h quote volume is below `LIQUIDITY_MIN_VOLUME_24H` (default $50M) are excluded for the run (`PAIR_EXCLUDED` logged) — the default list is now BTC, ETH, SOL, BNB, XRP. Claude's prompt requests step-by-step reasoning in a `<thinking>` tag followed by strict JSON (integer confidence, non-empty reasoning); anything that fails validation degrades to the no-trade `chop` fallback with a `REGIME_PARSE_FAILURE` event. The regime prompt is also enriched with the outcomes of its own last five calls, portfolio drawdown from peak, an approximate BTC volume dominance, and the trailing 7-day win rate / profit factor.
 
 ## Testnet mode
 
@@ -179,6 +221,9 @@ src/
   engine/testnetExecutor.js  Binance Spot TESTNET executor (frozen testnet URL);
                       no live/mainnet executor exists
   report/daily.js     daily HTML + console report
-  db.js               SQLite schema and helpers
+  backtest.js         historical replay + grid search (separate DBs)
+  montecarlo.js       resampled P&L risk analysis
+  alert.js            Telegram alerts (optional, never blocking)
+  db.js               SQLite schema, migrations, helpers
 test/                 node:test suites (no extra deps)
 ```

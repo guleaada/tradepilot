@@ -15,7 +15,7 @@ export const FALLBACK_REGIME = Object.freeze({
   regime: 'chop',
   confidence: 0,
   trade_allowed: false,
-  reasoning: 'fallback: AI output missing or invalid',
+  reasoning: 'parse_failure',
 });
 
 const VALID_REGIMES = new Set(['bullish', 'bearish', 'chop']);
@@ -24,20 +24,26 @@ const SYSTEM_PROMPT = [
   'You are the market-regime analyst for a crypto paper-trading research system.',
   'You receive a compact JSON market summary for one trading pair.',
   'Classify the current regime and decide whether the deterministic rule engine should be allowed to trade at all.',
-  'The summary may include an x_sentiment block (crowd sentiment from X).',
+  'The summary may include an x_sentiment block (crowd sentiment from X) and a portfolio_context block.',
   'Treat extreme crowd euphoria (very_bullish with intensity > 85) as a caution signal, not a buy signal;',
   'likewise treat extreme panic as a possible contrarian datapoint.',
   'Sentiment is one input among several — the technicals still lead.',
   'You do not size positions, pick entries, or place orders.',
-  'Respond with ONLY raw JSON, no markdown, no code fences, exactly this schema:',
-  '{"regime":"bullish"|"bearish"|"chop","confidence":0-100,"trade_allowed":true|false,"reasoning":"max 2 sentences"}',
+  'First reason step by step inside a <thinking>...</thinking> tag.',
+  'After </thinking>, output ONLY valid raw JSON, no markdown, no code fences, exactly this schema:',
+  '{"regime":"bullish"|"bearish"|"chop","confidence":<integer 0-100>,"trade_allowed":true|false,"reasoning":"non-empty, max 2 sentences"}',
 ].join(' ');
 
-// Parse defensively: strip code fences, extract the outermost JSON object,
-// validate the schema. Returns null on any failure.
+// Parse defensively: strip <thinking> blocks and code fences, extract the
+// outermost JSON object, then validate strictly — regime in the known set,
+// confidence an integer (clamped to 0-100), trade_allowed boolean, reasoning
+// a non-empty string (truncated to 200 chars). Returns null on any failure.
 export function parseRegimeResponse(text) {
   if (typeof text !== 'string' || !text.trim()) return null;
-  let body = text.trim();
+  let body = text
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+    .replace(/[\s\S]*<\/thinking>/i, (m) => (m.includes('<thinking') ? m : '')) // tolerate a lone closing tag
+    .trim();
   const fenced = body.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
   if (fenced) body = fenced[1].trim();
   if (!body.startsWith('{')) {
@@ -55,20 +61,44 @@ export function parseRegimeResponse(text) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
   if (!VALID_REGIMES.has(obj.regime)) return null;
   const confidence = Number(obj.confidence);
-  if (!Number.isFinite(confidence)) return null;
+  if (!Number.isInteger(confidence)) return null;
   if (typeof obj.trade_allowed !== 'boolean') return null;
+  const reasoning = obj.reasoning ?? obj.reason;
+  if (typeof reasoning !== 'string' || !reasoning.trim()) return null;
   return {
     regime: obj.regime,
     confidence: Math.max(0, Math.min(100, confidence)),
     trade_allowed: obj.trade_allowed,
-    reasoning: typeof obj.reasoning === 'string' ? obj.reasoning.slice(0, 500) : '',
+    reasoning: reasoning.trim().slice(0, 200),
   };
+}
+
+// Outcomes of the last N regime calls: portfolio return over the 4h following
+// each call, measured from equity snapshots.
+export function regimeCallOutcomes(pair, db = getDb(), limit = 5) {
+  const calls = db
+    .prepare('SELECT ts, regime, confidence, trade_allowed FROM regime_calls WHERE pair = ? ORDER BY id DESC LIMIT ?')
+    .all(pair, limit);
+  const eqAt = db.prepare('SELECT equity FROM equity_snapshots WHERE ts >= ? ORDER BY ts LIMIT 1');
+  return calls.map((c) => {
+    const start = eqAt.get(c.ts);
+    const end = eqAt.get(new Date(Date.parse(c.ts) + 4 * 3_600_000).toISOString());
+    const ret = start && end && start.equity > 0 ? ((end.equity - start.equity) / start.equity) * 100 : null;
+    return {
+      ts: c.ts,
+      regime: c.regime,
+      confidence: c.confidence,
+      trade_allowed: !!c.trade_allowed,
+      return_4h_pct: ret === null ? null : Number(ret.toFixed(3)),
+    };
+  });
 }
 
 // Compact market summary fed to Claude. Kept well under ~1,500 tokens.
 // `sentiment` is the latest Grok X-sentiment block (or null when the xAI
-// layer is disabled).
-export function buildMarketSummary(pair, market, recentCalls = [], recentTrades = [], sentiment = null) {
+// layer is disabled). `context` carries portfolio-level facts: drawdown from
+// peak, BTC dominance approximation, trailing 7-day stats.
+export function buildMarketSummary(pair, market, recentCalls = [], recentTrades = [], sentiment = null, context = null) {
   const r = (v, d = 2) => (v === null || v === undefined ? null : Number(v.toFixed(d)));
   return {
     pair,
@@ -93,7 +123,9 @@ export function buildMarketSummary(pair, market, recentCalls = [], recentTrades 
       regime: c.regime,
       confidence: c.confidence,
       trade_allowed: !!c.trade_allowed,
+      ...(c.return_4h_pct !== undefined ? { return_4h_pct: c.return_4h_pct } : {}),
     })),
+    portfolio_context: context,
     recent_closed_trades: recentTrades.map((t) => ({
       exit_time: t.exit_time,
       pnl: r(t.pnl),
@@ -177,14 +209,14 @@ function decayed(row, points = config.budgetDecayPoints) {
   return { ...base, confidence: Math.max(0, base.confidence - points) };
 }
 
-function recordCall(db, pair, regime, summary, usage, estCost, source, rawText) {
+function recordCall(db, pair, regime, summary, usage, estCost, source, rawText, ts = nowIso()) {
   db.prepare(
     `INSERT INTO regime_calls
        (ts, pair, regime, confidence, trade_allowed, reasoning, raw_json, summary_json,
         input_tokens, output_tokens, est_cost, source)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
-    nowIso(),
+    ts,
     pair,
     regime.regime,
     regime.confidence,
@@ -201,7 +233,8 @@ function recordCall(db, pair, regime, summary, usage, estCost, source, rawText) 
 
 // Main entry: returns the regime the rule engine should use this cycle.
 // Respects AI cadence, the Groq pre-filter, and the hard daily budget cap.
-export async function getRegime(pair, summary, db = getDb()) {
+// `nowMs` is overridable so the backtester can run the cadence on sim time.
+export async function getRegime(pair, summary, db = getDb(), nowMs = Date.now()) {
   if (config.mock) {
     const mock = {
       regime: 'bullish',
@@ -209,14 +242,14 @@ export async function getRegime(pair, summary, db = getDb()) {
       trade_allowed: true,
       reasoning: 'Mock regime: synthetic uptrend with healthy momentum.',
     };
-    recordCall(db, pair, mock, summary, { input_tokens: 0, output_tokens: 0 }, 0, 'mock', null);
+    recordCall(db, pair, mock, summary, { input_tokens: 0, output_tokens: 0 }, 0, 'mock', null, new Date(nowMs).toISOString());
     return mock;
   }
 
   const lastCall = db
     .prepare('SELECT * FROM regime_calls WHERE pair = ? ORDER BY id DESC LIMIT 1')
     .get(pair);
-  const ageHours = lastCall ? (Date.now() - Date.parse(lastCall.ts)) / 3_600_000 : Infinity;
+  const ageHours = lastCall ? (nowMs - Date.parse(lastCall.ts)) / 3_600_000 : Infinity;
 
   // Cadence: never call Claude more often than every aiCadenceHours per pair.
   if (lastCall && ageHours < config.aiCadenceHours) {
@@ -252,13 +285,14 @@ export async function getRegime(pair, summary, db = getDb()) {
     addSpend(cost, db);
 
     const parsed = parseRegimeResponse(text);
+    const tsIso = new Date(nowMs).toISOString();
     if (!parsed) {
-      logEvent('AI_PARSE_FAIL', { pair, raw: String(text).slice(0, 300) }, db);
+      logEvent('REGIME_PARSE_FAILURE', { pair, raw: String(text).slice(0, 300) }, db);
       const fb = { ...FALLBACK_REGIME };
-      recordCall(db, pair, fb, summary, usage, cost, 'claude_parse_fail', text);
+      recordCall(db, pair, fb, summary, usage, cost, 'claude_parse_fail', text, tsIso);
       return fb;
     }
-    recordCall(db, pair, parsed, summary, usage, cost, 'claude', text);
+    recordCall(db, pair, parsed, summary, usage, cost, 'claude', text, tsIso);
     return parsed;
   } catch (err) {
     logEvent('AI_ERROR', { pair, error: String(err).slice(0, 300) }, db);
