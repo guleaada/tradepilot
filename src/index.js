@@ -12,11 +12,28 @@ import { atr, ema, last, rsi, volatility } from './indicators.js';
 import { buildMarketSummary, getRegime } from './ai/regime.js';
 import { getSentiment } from './ai/sentiment.js';
 import { PaperExecutor } from './engine/executor.js';
+import { assertTestnetBase, createMockTestnetFetch, TESTNET_BASE, TestnetExecutor } from './engine/testnetExecutor.js';
 import { runPairRules } from './engine/rules.js';
 import { getCash, getEquity, snapshotEquity } from './engine/portfolio.js';
 import { consoleSummary } from './report/daily.js';
 
-const executor = new PaperExecutor();
+// Selected in main(). Default is the paper simulator; 'testnet' requires the
+// hard-coded testnet base URL to pass the mainnet guard. No live executor
+// exists in this codebase.
+let executor = new PaperExecutor();
+
+function buildExecutor() {
+  if (config.executor === 'paper') return new PaperExecutor();
+  if (config.executor === 'testnet') {
+    assertTestnetBase(TESTNET_BASE); // refuse to start unless the URL is testnet
+    console.log('EXECUTOR: BINANCE SPOT TESTNET — no real funds');
+    if (config.mock) {
+      return new TestnetExecutor({ apiKey: 'mock', apiSecret: 'mock', fetchImpl: createMockTestnetFetch() });
+    }
+    return new TestnetExecutor();
+  }
+  throw new Error(`unknown EXECUTOR "${config.executor}" — use "paper" or "testnet"`);
+}
 
 async function loadMarket(pair) {
   const [k1h, k4h, ticker, fundingRate] = await Promise.all([
@@ -52,6 +69,14 @@ export async function runCycle() {
   const db = getDb();
   const prices = {};
 
+  // Testnet: reconcile local cash against exchange balances at cycle start.
+  // On STATE_MISMATCH, exits still run but new entries are blocked this cycle.
+  let entriesBlocked = false;
+  if (typeof executor.reconcile === 'function') {
+    entriesBlocked = !(await executor.reconcile(db));
+    if (entriesBlocked) console.warn('STATE_MISMATCH: blocking new entries this cycle (see events table)');
+  }
+
   for (const pair of config.pairs) {
     try {
       const market = await loadMarket(pair);
@@ -69,7 +94,7 @@ export async function runCycle() {
       const summary = buildMarketSummary(pair, market, recentCalls, recentTrades, sentiment);
       const regime = await getRegime(pair, summary, db);
 
-      const actions = runPairRules({
+      const actions = await runPairRules({
         pair,
         price: market.price,
         atr1h: market.atr1h,
@@ -79,12 +104,17 @@ export async function runCycle() {
         executor,
         db,
         prices,
+        entriesBlocked,
       });
       for (const a of actions) {
         if (a.type === 'open') {
-          console.log(`[${pair}] OPEN qty=${a.qty.toFixed(6)} entry=${a.entry.toFixed(2)} stop=${a.stop.toFixed(2)} tp=${a.tp.toFixed(2)}`);
+          const slipBps = ((a.entry / a.signal - 1) * 10_000).toFixed(1);
+          console.log(`[${pair}] OPEN qty=${a.qty.toFixed(6)} fill=${a.entry.toFixed(2)} (signal ${a.signal.toFixed(2)}, ${slipBps}bps) stop=${a.stop.toFixed(2)} tp=${a.tp.toFixed(2)}`);
         } else if (a.type === 'close') {
-          console.log(`[${pair}] CLOSE reason=${a.reason} pnl=$${a.pnl.toFixed(2)}`);
+          const slipBps = ((a.exit / a.signal - 1) * 10_000).toFixed(1);
+          console.log(`[${pair}] CLOSE reason=${a.reason} pnl=$${a.pnl.toFixed(2)} fill=${a.exit.toFixed(2)} (signal ${a.signal.toFixed(2)}, ${slipBps}bps)`);
+        } else if (a.type === 'exit_skipped') {
+          console.log(`[${pair}] EXIT SKIPPED (${a.reason}) — position stays open, retrying next cycle`);
         } else {
           console.log(`[${pair}] no entry (${a.reason}) | regime=${regime.regime}/${regime.confidence} price=${market.price.toFixed(2)} rsi1h=${market.rsi1h?.toFixed(1)}`);
         }
@@ -107,8 +137,11 @@ export async function runCycle() {
 
 async function main() {
   const once = process.argv.includes('--once');
-  console.log(`TradePilot — PAPER TRADING ONLY${config.mock ? ' [MOCK DATA]' : ''}`);
+  console.log(`TradePilot — NO REAL FUNDS (executor: ${config.executor})${config.mock ? ' [MOCK DATA]' : ''}`);
   console.log(`pairs: ${config.pairs.join(', ')} | cycle: ${config.cycleMinutes}m | AI cadence: ${config.aiCadenceHours}h | budget: $${config.aiDailyBudgetUsd}/day`);
+
+  executor = buildExecutor();
+  if (typeof executor.init === 'function') await executor.init();
 
   await runCycle();
   if (once) {

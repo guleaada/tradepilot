@@ -37,7 +37,24 @@ CREATE TABLE IF NOT EXISTS trades (
   exit_price  REAL,
   exit_fee    REAL,
   pnl         REAL,
-  exit_reason TEXT
+  exit_reason TEXT,
+  entry_order_id TEXT,
+  exit_order_id  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS orders (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts            TEXT NOT NULL,
+  pair          TEXT NOT NULL,
+  side          TEXT NOT NULL,
+  type          TEXT NOT NULL DEFAULT 'MARKET',
+  requested_qty REAL,
+  executed_qty  REAL,
+  signal_price  REAL,
+  fill_price    REAL,
+  status        TEXT,
+  order_id      TEXT,
+  raw_json      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS equity_snapshots (
@@ -96,6 +113,7 @@ export function openDb(dbPath = config.dbPath) {
   db.pragma('busy_timeout = 5000');
   migrateAiBudget(db);
   db.exec(SCHEMA);
+  migrateTrades(db);
   db.prepare('INSERT OR IGNORE INTO portfolio (id, cash) VALUES (1, ?)').run(config.startBalance);
   return db;
 }
@@ -117,6 +135,13 @@ function migrateAiBudget(db) {
       SELECT date, 'anthropic', spend FROM ai_budget_old;
     DROP TABLE ai_budget_old;
   `);
+}
+
+// Pre-testnet DBs lack the Binance order-id columns on trades.
+function migrateTrades(db) {
+  const cols = db.prepare('PRAGMA table_info(trades)').all().map((c) => c.name);
+  if (!cols.includes('entry_order_id')) db.exec('ALTER TABLE trades ADD COLUMN entry_order_id TEXT');
+  if (!cols.includes('exit_order_id')) db.exec('ALTER TABLE trades ADD COLUMN exit_order_id TEXT');
 }
 
 let _db = null;

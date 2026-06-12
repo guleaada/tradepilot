@@ -71,6 +71,7 @@ export function generateReport(db = getDb(), date = new Date().toISOString().sli
   const cash = getCash(db);
   const equity = getEquity({}, db);
   const regimes = db.prepare('SELECT * FROM regime_calls ORDER BY id DESC LIMIT 10').all();
+  const orders = db.prepare('SELECT * FROM orders ORDER BY id DESC LIMIT 20').all();
   const sentiments = config.pairs
     .map((pair) => ({ pair, s: getLatestSentiment(pair, db) }))
     .filter(({ s }) => s);
@@ -93,7 +94,7 @@ export function generateReport(db = getDb(), date = new Date().toISOString().sli
   .banner { background: #fef3c7; border: 1px solid #f59e0b; padding: 8px 12px; border-radius: 6px; }
 </style></head><body>
 <h1>TradePilot — Daily Report ${esc(date)}</h1>
-<p class="banner"><strong>Paper trading only.</strong> Simulated fills against live market data. No real orders.</p>
+<p class="banner"><strong>No real funds.</strong> Active executor: <strong>${esc(config.executor)}</strong>${config.executor === 'testnet' ? ' (Binance Spot Testnet — real order book, testnet balances)' : ' (simulated fills against live market data)'}. Mainnet trading is intentionally not implemented.</p>
 
 <h2>Equity curve</h2>
 ${equityCurveSvg(stats.snapshots)}
@@ -130,6 +131,15 @@ ${open.map((p) => `<tr><td>${esc(p.pair)}</td><td>${p.qty.toFixed(6)}</td><td>${
 ${stats.closed.map((t) => `<tr><td>${esc(t.pair)}</td><td>${t.entry_price.toFixed(2)}</td><td>${(t.exit_price ?? 0).toFixed(2)}</td><td>${t.qty.toFixed(6)}</td><td class="${t.pnl >= 0 ? 'pos' : 'neg'}">${usd(t.pnl)}</td><td>${esc(t.exit_reason)}</td><td>${esc(t.exit_time)}</td></tr>`).join('\n') || '<tr><td colspan="7">none</td></tr>'}
 </table>
 
+${orders.length ? `<h2>Recent orders — real fill vs signal price</h2>
+<table>
+<tr><th>Time</th><th>Pair</th><th>Side</th><th>Req qty</th><th>Exec qty</th><th>Signal</th><th>Fill</th><th>Slip (bps)</th><th>Status</th><th>Order ID</th></tr>
+${orders.map((o) => {
+  const slip = o.fill_price && o.signal_price ? ((o.fill_price / o.signal_price - 1) * 10_000).toFixed(1) : 'n/a';
+  return `<tr><td>${esc(o.ts)}</td><td>${esc(o.pair)}</td><td>${esc(o.side)}</td><td>${o.requested_qty ?? ''}</td><td>${o.executed_qty ?? ''}</td><td>${o.signal_price?.toFixed(2) ?? ''}</td><td>${o.fill_price?.toFixed(2) ?? ''}</td><td>${slip}</td><td>${esc(o.status)}</td><td>${esc(o.order_id ?? '')}</td></tr>`;
+}).join('\n')}
+</table>` : ''}
+
 <h2>Last 10 regime calls</h2>
 <table>
 <tr><th>Time</th><th>Pair</th><th>Regime</th><th>Conf</th><th>Trade allowed</th><th>Cost</th><th>Reasoning</th></tr>
@@ -152,6 +162,7 @@ export function consoleSummary(prices = {}, db = getDb()) {
   const pnl = todayPnl(db);
   const lines = [
     '── TradePilot cycle summary ' + '─'.repeat(30),
+    `executor: ${config.executor}${config.executor === 'testnet' ? ' (Binance Spot Testnet — no real funds)' : ''}`,
     `equity: $${equity.toFixed(2)}   cash: $${cash.toFixed(2)}   today P&L: $${pnl.toFixed(2)}   today AI spend: claude $${claudeSpend.toFixed(4)} | grok $${grokSpend.toFixed(4)}`,
   ];
   if (open.length) {

@@ -36,6 +36,11 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           # Optional: enables the Grok X-sentiment layer when set.
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          # Optional: Binance Spot TESTNET keys (fake funds). Only used when
+          # the repo variable TRADEPILOT_EXECUTOR is set to "testnet".
+          EXECUTOR: ${{ vars.TRADEPILOT_EXECUTOR }}
+          BINANCE_TESTNET_API_KEY: ${{ secrets.BINANCE_TESTNET_API_KEY }}
+          BINANCE_TESTNET_API_SECRET: ${{ secrets.BINANCE_TESTNET_API_SECRET }}
         run: npm run cycle
 
       - name: Generate report

@@ -95,6 +95,14 @@ export const config = {
   rsiEntryMin: num(process.env.RSI_ENTRY_MIN, 45),
   rsiEntryMax: num(process.env.RSI_ENTRY_MAX, 70),
 
+  // --- execution ---
+  // 'paper' (default) or 'testnet'. The testnet base URL is intentionally NOT
+  // configurable — it is a frozen constant in engine/testnetExecutor.js so this
+  // executor can never be pointed at mainnet. No live executor exists.
+  executor: (process.env.EXECUTOR || 'paper').toLowerCase(),
+  binanceTestnetApiKey: process.env.BINANCE_TESTNET_API_KEY || '',
+  binanceTestnetApiSecret: process.env.BINANCE_TESTNET_API_SECRET || '',
+
   // --- paper fill simulation ---
   slippage: num(process.env.SLIPPAGE, 0.0005), // 0.05% against you per fill
   takerFee: num(process.env.TAKER_FEE, 0.001), // 0.1% Binance spot taker fee per side

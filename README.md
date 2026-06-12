@@ -134,6 +134,18 @@ The console prints a one-screen summary (equity, open positions, today's P&L, to
 
 Everything in the report is derived from SQLite — every AI decision and every rule decision is explainable from the database alone (`regime_calls`, `trades`, `equity_snapshots`, `ai_budget`, `events`).
 
+## Testnet mode
+
+The bridge between paper simulation and reality: `EXECUTOR=testnet` places **real market orders on the Binance Spot Testnet** — a real order book with **fake funds that reset periodically**.
+
+1. Create testnet API keys at [testnet.binance.vision](https://testnet.binance.vision) (log in with GitHub, "Generate HMAC_SHA256 Key"). These keys do not work on mainnet — an extra safety property.
+2. Put them in `.env` as `BINANCE_TESTNET_API_KEY` / `BINANCE_TESTNET_API_SECRET` and set `EXECUTOR=testnet`.
+3. Run as usual. Startup prints `EXECUTOR: BINANCE SPOT TESTNET — no real funds`.
+
+What changes vs. paper mode: orders are signed (HMAC-SHA256) and placed as MARKET orders; quantities are floored to the exchange's `LOT_SIZE` step (below-minimum orders are skipped, never rounded up); the `trades` table records the **actual** average fill price and fees from the exchange response plus the Binance order id; every raw request/response lands in the `orders` table; and each cycle starts by reconciling local cash against `/api/v3/account` (mismatch ⇒ `STATE_MISMATCH` logged and entries blocked for that cycle). Stops and take-profits are still enforced by the rule engine every cycle — no native exchange stop orders, one source of truth. The report's "fill vs signal" column lets you validate paper mode's slippage assumptions against reality.
+
+The testnet base URL is **hard-coded** in [src/engine/testnetExecutor.js](src/engine/testnetExecutor.js) and asserted at startup — it cannot be redirected to mainnet via config or env. **Mainnet trading is intentionally not implemented anywhere in this codebase.**
+
 ## Running on GitHub Actions
 
 [.github/workflows/tradepilot.yml](.github/workflows/tradepilot.yml) runs `npm run cycle` every 15 minutes in a **private** repo:
@@ -163,7 +175,9 @@ src/
   ai/budget.js        daily AI spend tracker per provider (SQLite)
   engine/rules.js     deterministic strategy + risk rules
   engine/portfolio.js virtual portfolio, P&L
-  engine/executor.js  PaperExecutor (slippage + fees); no live executor exists
+  engine/executor.js  PaperExecutor (slippage + fees), the default
+  engine/testnetExecutor.js  Binance Spot TESTNET executor (frozen testnet URL);
+                      no live/mainnet executor exists
   report/daily.js     daily HTML + console report
   db.js               SQLite schema and helpers
 test/                 node:test suites (no extra deps)

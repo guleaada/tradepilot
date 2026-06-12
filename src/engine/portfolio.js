@@ -25,7 +25,7 @@ export function getEquity(prices = {}, db = getDb()) {
   return open.reduce((eq, p) => eq + p.qty * (prices[p.pair] ?? p.entry_price), cash);
 }
 
-export function openTrade({ pair, qty, fillPrice, fee, stopPrice, tpPrice }, db = getDb()) {
+export function openTrade({ pair, qty, fillPrice, fee, stopPrice, tpPrice, orderId = null }, db = getDb()) {
   const cost = fillPrice * qty + fee;
   const cash = getCash(db);
   if (cost > cash + 1e-9) throw new Error(`insufficient cash: need ${cost}, have ${cash}`);
@@ -33,16 +33,16 @@ export function openTrade({ pair, qty, fillPrice, fee, stopPrice, tpPrice }, db 
     setCash(cash - cost, db);
     const info = db
       .prepare(
-        `INSERT INTO trades (pair, side, status, entry_time, entry_price, qty, stop_price, tp_price, entry_fee)
-         VALUES (?, 'long', 'open', ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO trades (pair, side, status, entry_time, entry_price, qty, stop_price, tp_price, entry_fee, entry_order_id)
+         VALUES (?, 'long', 'open', ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(pair, nowIso(), fillPrice, qty, stopPrice, tpPrice, fee);
+      .run(pair, nowIso(), fillPrice, qty, stopPrice, tpPrice, fee, orderId === null ? null : String(orderId));
     return info.lastInsertRowid;
   });
   return tx();
 }
 
-export function closeTrade(tradeId, { fillPrice, fee, reason }, db = getDb()) {
+export function closeTrade(tradeId, { fillPrice, fee, reason, orderId = null }, db = getDb()) {
   const trade = db.prepare('SELECT * FROM trades WHERE id = ?').get(tradeId);
   if (!trade || trade.status !== 'open') throw new Error(`trade ${tradeId} not open`);
   const proceeds = fillPrice * trade.qty - fee;
@@ -51,9 +51,9 @@ export function closeTrade(tradeId, { fillPrice, fee, reason }, db = getDb()) {
     setCash(getCash(db) + proceeds, db);
     db.prepare(
       `UPDATE trades
-       SET status = 'closed', exit_time = ?, exit_price = ?, exit_fee = ?, pnl = ?, exit_reason = ?
+       SET status = 'closed', exit_time = ?, exit_price = ?, exit_fee = ?, pnl = ?, exit_reason = ?, exit_order_id = ?
        WHERE id = ?`,
-    ).run(nowIso(), fillPrice, fee, pnl, reason, tradeId);
+    ).run(nowIso(), fillPrice, fee, pnl, reason, orderId === null ? null : String(orderId), tradeId);
   });
   tx();
   return pnl;

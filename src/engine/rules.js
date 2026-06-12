@@ -87,7 +87,10 @@ export function isHalted(equity, db = getDb(), cfg = config) {
 }
 
 // Run exits then (maybe) one entry for a pair. Returns a list of actions taken.
-export function runPairRules({ pair, price, atr1h, rsi1h, ema50_4h, regime, executor, db = getDb(), cfg = config, prices = {} }) {
+// Executor calls are awaited so the same code path serves PaperExecutor
+// (synchronous values) and TestnetExecutor (real network fills). An executor
+// may return { skipped: <reason> } instead of a fill; that never throws.
+export async function runPairRules({ pair, price, atr1h, rsi1h, ema50_4h, regime, executor, db = getDb(), cfg = config, prices = {}, entriesBlocked = false }) {
   const actions = [];
 
   // 1. Exits — checked every cycle against live price.
@@ -95,16 +98,26 @@ export function runPairRules({ pair, price, atr1h, rsi1h, ema50_4h, regime, exec
   if (position) {
     const reason = evaluateExit(position, price, regime, cfg);
     if (reason) {
-      const fill = executor.sell(pair, position.qty, price);
-      const pnl = closeTrade(position.id, { fillPrice: fill.fillPrice, fee: fill.fee, reason }, db);
-      logEvent('TRADE_CLOSED', { pair, reason, pnl, exitPrice: fill.fillPrice }, db);
-      actions.push({ type: 'close', pair, reason, pnl });
+      const fill = await executor.sell(pair, position.qty, price);
+      if (fill.skipped) {
+        // Position stays open; we retry next cycle. State remains consistent.
+        logEvent('EXIT_ORDER_SKIPPED', { pair, reason: fill.skipped, wanted: reason }, db);
+        actions.push({ type: 'exit_skipped', pair, reason: fill.skipped });
+      } else {
+        const pnl = closeTrade(
+          position.id,
+          { fillPrice: fill.fillPrice, fee: fill.fee, reason, orderId: fill.orderId ?? null },
+          db,
+        );
+        logEvent('TRADE_CLOSED', { pair, reason, pnl, exitPrice: fill.fillPrice, signal: price }, db);
+        actions.push({ type: 'close', pair, reason, pnl, exit: fill.fillPrice, signal: price });
+      }
     }
   }
 
   // 2. Entry gate.
   const equity = getEquity({ ...prices, [pair]: price }, db);
-  const halted = isHalted(equity, db, cfg);
+  const halted = isHalted(equity, db, cfg) || entriesBlocked;
   const gate = entryAllowed(
     {
       regime,
@@ -123,25 +136,30 @@ export function runPairRules({ pair, price, atr1h, rsi1h, ema50_4h, regime, exec
     return actions;
   }
 
-  // 3. Sizing + simulated fill.
+  // 3. Sizing, cash pre-check (BEFORE any order leaves), then the fill.
   const { qty, stopDist } = computePositionSize(equity, price, atr1h, cfg);
   if (qty <= 0) {
     actions.push({ type: 'no_entry', pair, reason: 'zero_size' });
     return actions;
   }
-  const fill = executor.buy(pair, qty, price);
-  const cash = getCash(db);
-  if (fill.notional + fill.fee > cash) {
+  const estCost = qty * price * (1 + cfg.slippage) * (1 + cfg.takerFee);
+  if (estCost > getCash(db)) {
     actions.push({ type: 'no_entry', pair, reason: 'insufficient_cash' });
     return actions;
   }
+  const fill = await executor.buy(pair, qty, price);
+  if (fill.skipped) {
+    actions.push({ type: 'no_entry', pair, reason: fill.skipped });
+    return actions;
+  }
+  const tradeQty = fill.executedQty ?? qty;
   const stopPrice = fill.fillPrice - stopDist;
   const tpPrice = fill.fillPrice + cfg.tpAtrMult * atr1h;
   const tradeId = openTrade(
-    { pair, qty, fillPrice: fill.fillPrice, fee: fill.fee, stopPrice, tpPrice },
+    { pair, qty: tradeQty, fillPrice: fill.fillPrice, fee: fill.fee, stopPrice, tpPrice, orderId: fill.orderId ?? null },
     db,
   );
-  logEvent('TRADE_OPENED', { pair, tradeId, qty, entry: fill.fillPrice, stop: stopPrice, tp: tpPrice }, db);
-  actions.push({ type: 'open', pair, tradeId, qty, entry: fill.fillPrice, stop: stopPrice, tp: tpPrice });
+  logEvent('TRADE_OPENED', { pair, tradeId, qty: tradeQty, entry: fill.fillPrice, signal: price, stop: stopPrice, tp: tpPrice }, db);
+  actions.push({ type: 'open', pair, tradeId, qty: tradeQty, entry: fill.fillPrice, signal: price, stop: stopPrice, tp: tpPrice });
   return actions;
 }
