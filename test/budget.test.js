@@ -4,12 +4,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { config } from '../src/config.js';
 import { openDb } from '../src/db.js';
 import {
   addSpend,
   costFromUsage,
+  estimateGrokCallCost,
   getDailySpend,
   grokCostFromUsage,
+  warnIfBudgetMisconfigured,
   wouldExceedBudget,
 } from '../src/ai/budget.js';
 
@@ -60,6 +63,37 @@ test('grok cost includes per-source Live Search charge', () => {
     xaiSearchCostPerSource: 0.025,
   });
   assert.ok(Math.abs(cost - 0.25555) < 1e-12);
+});
+
+test('default Grok config admits at least one call on a fresh day', () => {
+  const db = openDb(':memory:');
+  // ~$0.13 estimate (600 in + 250 out tokens, 5 sources × $0.025) vs $1.00 cap
+  const est = estimateGrokCallCost(config);
+  assert.ok(est < config.grokDailyBudgetUsd, `estimate ${est} must fit under cap ${config.grokDailyBudgetUsd}`);
+  assert.equal(wouldExceedBudget(est, config.grokDailyBudgetUsd, db, '2026-06-12', 'grok'), false);
+  assert.equal(warnIfBudgetMisconfigured(est, config.grokDailyBudgetUsd, 'grok', db), false);
+  db.close();
+});
+
+test('BUDGET_MISCONFIGURED logged once per day per provider when estimate exceeds cap', () => {
+  const db = openDb(':memory:');
+  // estimate alone exceeds the cap -> the gate can never admit a call
+  assert.equal(warnIfBudgetMisconfigured(0.38, 0.3, 'grok', db), true);
+  assert.equal(warnIfBudgetMisconfigured(0.38, 0.3, 'grok', db), true); // no duplicate event
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'BUDGET_MISCONFIGURED'").get().n, 1);
+
+  // a different provider gets its own (single) event
+  warnIfBudgetMisconfigured(0.9, 0.5, 'anthropic', db);
+  warnIfBudgetMisconfigured(0.9, 0.5, 'anthropic', db);
+  const rows = db.prepare("SELECT detail FROM events WHERE type = 'BUDGET_MISCONFIGURED'").all();
+  assert.equal(rows.length, 2);
+  const providers = rows.map((r) => JSON.parse(r.detail).provider).sort();
+  assert.deepEqual(providers, ['anthropic', 'grok']);
+
+  // healthy config logs nothing
+  assert.equal(warnIfBudgetMisconfigured(0.01, 0.5, 'anthropic', db), false);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'BUDGET_MISCONFIGURED'").get().n, 2);
+  db.close();
 });
 
 test('ai_budget migration adds provider column and preserves existing rows', () => {

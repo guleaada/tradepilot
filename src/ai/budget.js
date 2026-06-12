@@ -1,6 +1,6 @@
 // Daily AI spend tracker per provider, persisted in SQLite (table: ai_budget).
 // Provider defaults to 'anthropic' so the original call sites are unchanged.
-import { getDb } from '../db.js';
+import { getDb, logEvent } from '../db.js';
 import { config } from '../config.js';
 
 export function todayUtc(now = new Date()) {
@@ -29,6 +29,23 @@ export function wouldExceedBudget(
   provider = 'anthropic',
 ) {
   return getDailySpend(db, date, provider) + estCostUsd > capUsd;
+}
+
+// If the pre-call estimate alone exceeds the full daily cap, the gate can
+// never admit even one call — that's a configuration error, not normal budget
+// exhaustion. Log it loudly, once per day per provider. Returns true when
+// misconfigured.
+export function warnIfBudgetMisconfigured(estCostUsd, capUsd, provider, db = getDb(), date = todayUtc()) {
+  if (estCostUsd <= capUsd) return false;
+  const seen = db
+    .prepare(
+      "SELECT id FROM events WHERE type = 'BUDGET_MISCONFIGURED' AND ts >= ? AND detail LIKE ? LIMIT 1",
+    )
+    .get(`${date}T00:00:00`, `%"provider":"${provider}"%`);
+  if (!seen) {
+    logEvent('BUDGET_MISCONFIGURED', { provider, estCost: estCostUsd, cap: capUsd }, db);
+  }
+  return true;
 }
 
 export function costFromUsage(inputTokens, outputTokens, pricing = config.pricing) {

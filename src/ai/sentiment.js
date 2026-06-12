@@ -11,6 +11,7 @@ import {
   addSpend,
   estimateGrokCallCost,
   grokCostFromUsage,
+  warnIfBudgetMisconfigured,
   wouldExceedBudget,
 } from './budget.js';
 
@@ -192,6 +193,7 @@ export async function getSentiment(pair, db = getDb(), cfg = config) {
 
   // Hard daily budget cap (separate from the Anthropic cap).
   const estCost = estimateGrokCallCost(cfg);
+  warnIfBudgetMisconfigured(estCost, cfg.grokDailyBudgetUsd, 'grok', db);
   if (wouldExceedBudget(estCost, cfg.grokDailyBudgetUsd, db, undefined, 'grok')) {
     logEvent('GROK_BUDGET_SKIPPED', { pair, estCost }, db);
     return lastRow ? decayed(lastRow, cfg.sentimentDecayPoints) : { ...FALLBACK_SENTIMENT };

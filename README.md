@@ -148,7 +148,7 @@ A `concurrency` group guarantees runs never overlap. Note that scheduled workflo
 
 - `.env` and `node_modules` are gitignored; `.env.example` contains placeholders only.
 - No real exchange API keys anywhere — market data is public and unauthenticated.
-- The Anthropic key is the only secret, read from the environment, never logged or persisted.
+- The only secrets are AI provider keys — `ANTHROPIC_API_KEY` plus the optional `XAI_API_KEY` and `GROQ_API_KEY` — all read from the environment, never logged or persisted.
 
 ## Project layout
 

@@ -96,6 +96,17 @@ test('budget cap hit with no prior sentiment falls back to neutral', async () =>
   db.close();
 });
 
+test('misconfigured cap (estimate > full budget) logs BUDGET_MISCONFIGURED and skips', async () => {
+  const db = openDb(':memory:');
+  // cap so small the per-call estimate alone can never fit
+  const cfg = { ...config, mock: false, xaiApiKey: 'test-key', grokDailyBudgetUsd: 0.01 };
+  const out = await getSentiment('BTCUSDT', db, cfg);
+  assert.deepEqual(out, { ...FALLBACK_SENTIMENT });
+  assert.ok(db.prepare("SELECT id FROM events WHERE type = 'BUDGET_MISCONFIGURED'").get());
+  assert.ok(db.prepare("SELECT id FROM events WHERE type = 'GROK_BUDGET_SKIPPED'").get());
+  db.close();
+});
+
 test('intensity decay floors at zero', async () => {
   const db = openDb(':memory:');
   const cfg = { ...config, mock: false, xaiApiKey: 'test-key' };

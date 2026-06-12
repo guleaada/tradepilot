@@ -65,9 +65,9 @@ export const config = {
   grokSearchParameters: {
     mode: 'on',
     sources: [{ type: 'x' }],
-    max_search_results: 15,
+    max_search_results: 5,
   },
-  grokDailyBudgetUsd: num(process.env.GROK_DAILY_BUDGET_USD, 0.3),
+  grokDailyBudgetUsd: num(process.env.GROK_DAILY_BUDGET_USD, 1.0),
   grokMaxOutputTokens: num(process.env.GROK_MAX_OUTPUT_TOKENS, 300),
   // xAI pricing constants (USD). Verify against current xAI pricing — token
   // rates AND the per-source Live Search charge are billed separately.
@@ -78,7 +78,7 @@ export const config = {
   xaiSearchCostPerSource: num(process.env.XAI_SEARCH_COST_PER_SOURCE, 0.025), // $25 / 1k sources
   grokEstInputTokens: num(process.env.GROK_EST_INPUT_TOKENS, 600),
   grokEstOutputTokens: num(process.env.GROK_EST_OUTPUT_TOKENS, 250),
-  grokEstSearchSources: num(process.env.GROK_EST_SEARCH_SOURCES, 15),
+  grokEstSearchSources: num(process.env.GROK_EST_SEARCH_SOURCES, 5),
   sentimentDecayPoints: num(process.env.SENTIMENT_DECAY_POINTS, 30),
 
   // --- risk rules (deterministic; never AI-controlled) ---

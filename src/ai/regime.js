@@ -7,6 +7,7 @@ import {
   addSpend,
   costFromUsage,
   estimateCallCost,
+  warnIfBudgetMisconfigured,
   wouldExceedBudget,
 } from './budget.js';
 
@@ -234,6 +235,7 @@ export async function getRegime(pair, summary, db = getDb()) {
 
   // Hard daily budget cap.
   const estCost = estimateCallCost();
+  warnIfBudgetMisconfigured(estCost, config.aiDailyBudgetUsd, 'anthropic', db);
   if (wouldExceedBudget(estCost, config.aiDailyBudgetUsd, db)) {
     logEvent('BUDGET_SKIPPED', { pair, estCost }, db);
     return lastCall ? decayed(lastCall) : { ...FALLBACK_REGIME };
